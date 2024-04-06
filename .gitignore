@@ -1,0 +1,8 @@
+# Compiled files
+build/
+.vscode/
+bin/
+debug/
+*.log
+*.a
+*.so
