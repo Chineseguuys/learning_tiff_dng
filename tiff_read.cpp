@@ -8,6 +8,8 @@
 
 #define LITTER_ENDIAN_MARKS 0x49
 
+// It is possible that other TIFF field types will be added in the future.
+// Readers should skip over fields containing an unexpected field type
 enum DE_FIELD_TYPE {
     BYTE = 1,   // 8-bit unsigned integer
     ASCII = 2,  // 8-bit byte that contains a 7-bits ASCII code, must terminated with a NUL(binary)
@@ -29,28 +31,29 @@ static std::map<int, int> FIELD_TYPE2SIZE = {
     {DE_FIELD_TYPE::ASCII, 1},
     {DE_FIELD_TYPE::SHORT, 2},
     {DE_FIELD_TYPE::LONG, 4},
-    {DE_FIELD_TYPE::RATIONAL, 4},
+    {DE_FIELD_TYPE::RATIONAL, 8},   // two LONGs
     {DE_FIELD_TYPE::SBYTE, 1},
     {DE_FIELD_TYPE::UNDEFINED, 1},
     {DE_FIELD_TYPE::SSHORT, 2},
     {DE_FIELD_TYPE::SLONG, 4},
-    {DE_FIELD_TYPE::SRATIONAL, 4},
+    {DE_FIELD_TYPE::SRATIONAL, 8},  // two SLONGs
     {DE_FIELD_TYPE::FLOAT, 4},
     {DE_FIELD_TYPE::DOUBLE, 8}
 };
 
 enum DE_TAG {
-    IMAGE_WIDTH = 256,  // width of image
+    IMAGE_WIDTH = 256,  // width of image or ImageLen
     IMAGE_HEIGHT,       // height of image
     BITS_PER_SAMPLE,    // bit pre sample of the image
     COMPRESSION,        // compression type of the image
     PHOTO_METRIC_INTERPRETATION = 262,
-    STRIP_OFFSETS = 273,
-    SAMPLES_PER_PIXEL = 277,
-    ROWS_PRE_STRIP = 278,
-    STRIP_BYTE_COUNTS = 279,
+    STRIP_OFFSETS = 273,        // For each strip, the byte offset of that strip
+    SAMPLES_PER_PIXEL = 277,    // such like grayscale image, full rgb image use this
+    ROWS_PRE_STRIP = 278,       // The number of rows in each strip
+    STRIP_BYTE_COUNTS = 279,    // For each strip, the number of bytes in that strip after any compression.
     X_RESOLUTION = 282,
     Y_RESOLUTION = 283,
+    // TIFF also supports breaking an image into separate strips for increased editing flexibility and efficient I/O buffering
     RESOLUTION_UNIT = 296,
     SOFTWARE = 305,
     DATA_TIME = 306,
@@ -58,6 +61,22 @@ enum DE_TAG {
     DOCUMENT_NAME = 269,
     MAKE = 271,
     MODEL = 272,
+    COLOR_MAP = 320,    // for palette-color images, palette-color images has a RGB-lookup table(Color map)
+    EXIF_OFFSET = 34665, // offset of the ExifIFD for current image
+    DNG_VERSION = 50706, // dng version
+    DNG_BACKWARD_VERSION = 50707, // dng backward version
+    UNIQUE_CAMERA_MODEL = 50708, // unique camera model, ascii string
+    COLOR_MATRIX_1 = 50721, // use the color matrix convert sensor data to standard color space(sRGB or AdobeRGB)
+    // Provides additional colour correction or adjustment.Such as "Standard Mode", "Landscape Mode", "Portrait Mode", etc.
+    COLOR_MATRIX_2 = 50722,
+    CAMERA_CALIBRATION_1 = 50723, // For storing the camera's calibration data
+    CAMERA_CALIBRATION_2 = 50724, // For storing the camera's calibration data
+    ANALOG_BALANCE = 50727, // Specify the camera's analogue white balance factor， three rational array(R-G-B)
+    AS_SHOT_NEUTRAL = 50728, // representing the neutral colour state of the camera's sensor at the time of capture
+    BASELINE_EXPOSURE = 50730, // Base exposure level when the camera takes an image
+    BASELINE_NOISE = 50731, // Baseline noise level of images captured by the camera
+    BASELINE_SHARPNESS = 50732, // Specifies the baseline sharpness level for images captured by the camera
+    LINEAR_RESPONSE_LIMIT = 50734, // Specify the linear response limit of the camera sensor
 };
 
 struct TIFF_Header {
@@ -89,6 +108,7 @@ struct DirectoryEntry {
     double getDouble();
 };
 
+// Todo: There may be more than one IFD in a TIFF file. Each IFD defines a subfile.
 struct IFD {
     int16_t mNumDE; // number of Directory entries
     std::vector<DirectoryEntry> mDirectoryEnties;
@@ -109,7 +129,7 @@ void parseValueInDirectoryEntry(FILE* handle, std::vector<DirectoryEntry>& entri
 int main(int argc, char* argv[]) {
 
     // set log level to debug
-    spdlog::set_level(spdlog::level::debug);
+    spdlog::set_level(spdlog::level::trace);
 
     if (argc < 2) {
         spdlog::critical("args number is {}, need give the file path", argc);
@@ -196,6 +216,7 @@ void parseDirectoryEntry(FILE* handle, IFD& aIFD, TIFF_Header& header) {
     if (aIFD.mNumDE != 0) {
         // add earch directory entry to IFD
         for (int idx = 0; idx < aIFD.mNumDE; idx++) {
+            int curr_pos = ftell(handle);
             DirectoryEntry entry;
             readBytes = fread(&entry.mTag, 1, sizeof(DirectoryEntry::mTag), handle);
             if (readBytes != sizeof(DirectoryEntry::mTag)) {
@@ -230,6 +251,10 @@ void parseDirectoryEntry(FILE* handle, IFD& aIFD, TIFF_Header& header) {
                 spdlog::debug("read {} bytes from file", valueLength);
                 entry.mValuesArray = static_cast<unsigned char*>(malloc(valueLength));
                 readBytes = fread(entry.mValuesArray, 1, valueLength, handle);
+                // Because of the memory alignment, when the number of bytes read is less than 4, it needs to be followed by 0
+                int alignmentBytes = 4 - valueLength;
+                fseek(handle, alignmentBytes, SEEK_CUR);
+                spdlog::trace("memory alignment {} bytes", alignmentBytes);
             } else {
                 // store offsets
                 readBytes = fread(&entry.mOffsets, 1, sizeof(DirectoryEntry::mOffsets), handle);
