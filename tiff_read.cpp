@@ -6,6 +6,10 @@
 #include <spdlog/spdlog.h>  // need link spdlog so library
 #include <boost/rational.hpp>  // rational library
 
+#include <iostream>
+#include <string>
+
+
 #define LITTER_ENDIAN_MARKS 0x49
 
 // It is possible that other TIFF field types will be added in the future.
@@ -47,21 +51,24 @@ enum DE_TAG {
     BITS_PER_SAMPLE,    // bit pre sample of the image
     COMPRESSION,        // compression type of the image
     PHOTO_METRIC_INTERPRETATION = 262,
+    MAKE = 271,     // name of producter
+    MODEL = 272,    // Specific model or version number of equipment or software
     STRIP_OFFSETS = 273,        // For each strip, the byte offset of that strip
+    ORIENTATION = 274,
     SAMPLES_PER_PIXEL = 277,    // such like grayscale image, full rgb image use this
     ROWS_PRE_STRIP = 278,       // The number of rows in each strip
     STRIP_BYTE_COUNTS = 279,    // For each strip, the number of bytes in that strip after any compression.
     X_RESOLUTION = 282,
     Y_RESOLUTION = 283,
+    PLANAR_CONFIGURATION = 284,  // pixel 排列方式
     // TIFF also supports breaking an image into separate strips for increased editing flexibility and efficient I/O buffering
     RESOLUTION_UNIT = 296,
     SOFTWARE = 305,
     DATA_TIME = 306,
     ARTIST = 315,
     DOCUMENT_NAME = 269,
-    MAKE = 271,
-    MODEL = 272,
     COLOR_MAP = 320,    // for palette-color images, palette-color images has a RGB-lookup table(Color map)
+    YCbCr_COEFFICIENTS = 529,
     EXIF_OFFSET = 34665, // offset of the ExifIFD for current image
     DNG_VERSION = 50706, // dng version
     DNG_BACKWARD_VERSION = 50707, // dng backward version
@@ -106,13 +113,17 @@ struct DirectoryEntry {
     boost::rational<int32_t> getSRational();
     float getFloat();
     double getDouble();
+
+    // for debug
+    void printEntry();
 };
 
 // Todo: There may be more than one IFD in a TIFF file. Each IFD defines a subfile.
 struct IFD {
     int16_t mNumDE; // number of Directory entries
-    std::vector<DirectoryEntry> mDirectoryEnties;
     uint32_t mOffsets; // offset to next IFD
+    // map DE_TAG -> DirectoryEntry
+    std::map<uint16_t, DirectoryEntry> mTag2DirectoryEntry;
 };
 
 
@@ -124,7 +135,7 @@ void parseHeader(FILE* handle, TIFF_Header& header);
 // byteOrder: we need byte order to translate the value from litter to big endian
 void parseDirectoryEntry(FILE* handle, IFD& aIFD, TIFF_Header& header);
 // read values from file for each directory entry
-void parseValueInDirectoryEntry(FILE* handle, std::vector<DirectoryEntry>& entries);
+void parseValueInDirectoryEntry(FILE* handle, IFD& aIFD);
 
 int main(int argc, char* argv[]) {
 
@@ -151,7 +162,35 @@ int main(int argc, char* argv[]) {
     // parse IFD
     IFD theIFD;
     parseDirectoryEntry(fileHandle, theIFD, tiffHeader);
-    parseValueInDirectoryEntry(fileHandle, theIFD.mDirectoryEnties);
+    parseValueInDirectoryEntry(fileHandle, theIFD);
+
+    // try to read the thumbnail from the 
+    // get the stripOffset, In the current dng file, the thumbnail is not split into multiple parts.
+    uint32_t stripOffset = 0;
+    uint32_t stripByteCount = 0;
+    auto search = theIFD.mTag2DirectoryEntry.find(DE_TAG::STRIP_OFFSETS);
+    if (search != theIFD.mTag2DirectoryEntry.end()) {
+        stripOffset = search->second.getLong();
+        spdlog::trace("strip offset is {}", stripOffset);
+    }
+
+    search = theIFD.mTag2DirectoryEntry.find(DE_TAG::STRIP_BYTE_COUNTS);
+    if (search != theIFD.mTag2DirectoryEntry.end()) {
+        stripByteCount = search->second.getLong();
+        spdlog::trace("strip byte count is {}", stripByteCount);
+    }
+
+    // read the thumbnail from file
+    // In the current dng file, the thumbnail is not split into multiple parts.
+    FILE* file = fopen("thumbnail.jpeg", "wb");
+    if (file != nullptr) {
+        char* thumbnail = static_cast<char*>(malloc(stripByteCount));
+        fseek(fileHandle, stripOffset, SEEK_SET);
+        fread(thumbnail, 1, stripByteCount, fileHandle);
+        fwrite(thumbnail, 1, stripByteCount, file);
+        fclose(file);
+        free(thumbnail);
+    }
 
     // close file 
     fclose(fileHandle);
@@ -269,7 +308,7 @@ void parseDirectoryEntry(FILE* handle, IFD& aIFD, TIFF_Header& header) {
                     ((entry.mOffsets << 8) & 0xFF0000) | (entry.mFieldType << 24);
             }
             spdlog::debug("mOffsets is {} for {}'s entry", entry.mOffsets, idx);
-            aIFD.mDirectoryEnties.push_back(entry);
+            aIFD.mTag2DirectoryEntry.insert(std::pair(entry.mTag, entry));
         }
     }
 
@@ -287,8 +326,8 @@ void parseDirectoryEntry(FILE* handle, IFD& aIFD, TIFF_Header& header) {
     spdlog::debug("next ifd position is {}", aIFD.mOffsets);
 }
 
-void parseValueInDirectoryEntry(FILE* handle, std::vector<DirectoryEntry>& entries) {
-    for (DirectoryEntry& entry : entries) {
+void parseValueInDirectoryEntry(FILE* handle, IFD& aIFD) {
+    for (auto& [tag, entry] : aIFD.mTag2DirectoryEntry) {
         if (fseek(handle, entry.mOffsets, SEEK_SET)) {
             spdlog::critical("seek error: try seek to {}", entry.mOffsets);
             return;
@@ -304,6 +343,11 @@ void parseValueInDirectoryEntry(FILE* handle, std::vector<DirectoryEntry>& entri
         }
         switch (entry.mFieldType)
         {
+        case DE_FIELD_TYPE::BYTE:
+        case DE_FIELD_TYPE::ASCII:
+            entry.mValuesArray = static_cast<unsigned char*>(malloc(entry.mValueCounts * 1));
+            fread(entry.mValuesArray, 1, entry.mValueCounts, handle);
+            break;
         case DE_FIELD_TYPE::SHORT:
         case DE_FIELD_TYPE::SSHORT:
             entry.mValuesArray = static_cast<unsigned char*>(malloc(entry.mValueCounts * 2));
@@ -311,11 +355,14 @@ void parseValueInDirectoryEntry(FILE* handle, std::vector<DirectoryEntry>& entri
             break;
         case DE_FIELD_TYPE::LONG:
         case DE_FIELD_TYPE::SLONG:
-        case DE_FIELD_TYPE::RATIONAL:
-        case DE_FIELD_TYPE::SRATIONAL:
         case DE_FIELD_TYPE::FLOAT:
             entry.mValuesArray = static_cast<unsigned char*>(malloc(entry.mValueCounts * 4));
             fread(entry.mValuesArray, 1, 4 * entry.mValueCounts, handle);
+            break;
+        case DE_FIELD_TYPE::RATIONAL:
+        case DE_FIELD_TYPE::SRATIONAL:
+            entry.mValuesArray = static_cast<unsigned char*>(malloc(entry.mValueCounts * 8));
+            fread(entry.mValuesArray, 1, entry.mValueCounts * 8, handle);
             break;
         default:
             break;
@@ -347,4 +394,25 @@ uint32_t DirectoryEntry::getLong() {
     memcpy(&value, this->mValuesArray, 4);
     // Todo: consider litter endian and big endian
     return value;
+}
+
+void DirectoryEntry::printEntry() {
+    spdlog::trace("mTag:{},mFiledType:{},mValueCounts:{},mOffsets:{},mValuesArrays:{}",
+        mTag,
+        mFieldType,
+        mValueCounts,
+        mOffsets,
+        fmt::ptr(mValuesArray)
+    );
+
+    if (mValuesArray != nullptr) {
+        std::stringstream ss;
+        for (int i = 0; i < FIELD_TYPE2SIZE[mFieldType] * mValueCounts; i++) {
+            ss << std::hex << std::setw(2) << std::setfill('0');
+            ss << static_cast<int>(mValuesArray[i]);
+            ss << ",";
+        }
+
+        spdlog::trace("{}", ss.str());
+    }
 }
