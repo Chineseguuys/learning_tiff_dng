@@ -1,6 +1,7 @@
 # Compiled files
 build/
 .vscode/
+.xmake/
 bin/
 debug/
 *.log

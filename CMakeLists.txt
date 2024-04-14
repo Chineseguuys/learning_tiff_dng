@@ -10,10 +10,17 @@ pkg_check_modules(libraw_r.pc REQUIRED libraw_r)
 # 设置你的项目的源文件
 set(SOURCE_FILES
     tiff_read.cpp
+    ./src/parse_ifd.cpp
+    ./src/tiff_ifd.cpp
 )
 
 # 添加可执行文件
 add_executable(${PROJECT_NAME} ${SOURCE_FILES})
+
+target_include_directories(${PROJECT_NAME}
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 
 target_link_libraries(
     ${PROJECT_NAME} 
