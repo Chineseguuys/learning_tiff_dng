@@ -9,7 +9,7 @@ pkg_check_modules(libraw_r.pc REQUIRED libraw_r)
 
 # 设置你的项目的源文件
 set(SOURCE_FILES
-    tiff_read.cpp
+    parse_tiff.cpp
     ./src/parse_ifd.cpp
     ./src/tiff_ifd.cpp
 )

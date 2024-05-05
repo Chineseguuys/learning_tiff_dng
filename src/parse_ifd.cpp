@@ -36,8 +36,8 @@ void parseHeader(FILE* handle, TIFF_Header& header) {
     spdlog::debug("mOffsetofIFD is {}", header.mOffsetofIFD);
 }
 
-void parseDirectoryEntry(FILE* handle, IFD& aIFD, TIFF_Header& header) {
-    if (fseek(handle, header.mOffsetofIFD, SEEK_SET)) {
+void parseDirectoryEntry(FILE* handle, IFD& aIFD, TIFF_Header& header, int32_t currIFDOffset) {
+    if (fseek(handle, currIFDOffset, SEEK_SET)) {
         spdlog::critical("seek to IFD postion failed");
         return;
     }
@@ -115,7 +115,7 @@ void parseDirectoryEntry(FILE* handle, IFD& aIFD, TIFF_Header& header) {
             aIFD.mTag2DirectoryEntry.insert(std::pair(entry.mTag, entry));
         }
     }
-
+    spdlog::debug("{}: current file handle pos is {}", __FUNCTION__, ftell(handle));
     readBytes = fread(&aIFD.mOffsets, 1, sizeof(IFD::mOffsets), handle);
     if (readBytes != sizeof(IFD::mOffsets)) {
         spdlog::warn("parse ifd's mOffsets error");
@@ -171,5 +171,39 @@ void parseValueInDirectoryEntry(FILE* handle, IFD& aIFD) {
         default:
             break;
         }
+    }
+}
+
+
+void parseAllDirectoryEntry(FILE* handle, TIFF_Contexet& contexet) {
+    TIFF_Header& header = contexet.mTiffHeader;
+    if (header.mOffsetofIFD == 0) {
+        spdlog::warn("can not find first idf's offset");
+        return;
+    }
+
+    int32_t offset = header.mOffsetofIFD;
+    while (offset > 0) {
+        // 在这里循环解析所有的 ifd;
+        spdlog::debug("{}: parse for ifd with offset {}", __FUNCTION__, offset);
+        IFD currIFD{};
+        parseDirectoryEntry(handle, currIFD, header, offset);
+        parseValueInDirectoryEntry(handle, currIFD);
+        // does the ifd contain the subifds?
+        if (currIFD.containDirectoryEntry(DE_TAG::SUB_IFDS)) {
+            DirectoryEntry& directoryEntry = currIFD.getDirectoryEntry(DE_TAG::SUB_IFDS);
+            uint32_t subIFDsCount = directoryEntry.mValueCounts;
+            for (int i = 0; i < subIFDsCount; ++i) {
+                // read sub ifds
+                int32_t  subIfdsOffset = directoryEntry.getLong();
+                spdlog::debug("{}: for sub IFD with offset {}", __FUNCTION__, subIfdsOffset);
+                IFD subIfds{};
+                parseDirectoryEntry(handle, subIfds, header, subIfdsOffset);
+                parseValueInDirectoryEntry(handle, subIfds);
+                currIFD.mSubIFDs.push_back(subIfds);
+            }
+        }
+        contexet.mIFDs.push_back(currIFD);
+        offset = currIFD.mOffsets;
     }
 }

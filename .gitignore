@@ -1,5 +1,7 @@
 # Compiled files
 build/
+cmake-build-debug-gcc132/
+.idea/
 .vscode/
 .xmake/
 bin/
